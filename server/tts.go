@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,10 +53,22 @@ type speechRequest struct {
 	Model          string  `json:"model"`
 	Input          string  `json:"input"`
 	Voice          string  `json:"voice"`
-	ResponseFormat string  `json:"response_format"`
+	ResponseFormat string  `json:"response_format,omitempty"`
 	Speed          float64 `json:"speed"`
 	Instructions   string  `json:"instructions,omitempty"`
 	Language       string  `json:"language,omitempty"`
+}
+
+// upstreamHTTPError carries a non-200 upstream response so handlers can
+// relay it verbatim instead of misreading the error body as audio.
+type upstreamHTTPError struct {
+	Status      int
+	Body        []byte
+	ContentType string
+}
+
+func (e *upstreamHTTPError) Error() string {
+	return fmt.Sprintf("upstream status %d", e.Status)
 }
 
 // handleSpeech implements POST /v1/audio/speech.
@@ -145,6 +158,21 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		partReq.Input = text
 		res, wav, err := s.synthesize(r, cfg, upstreamModel, partReq, route)
 		if err != nil {
+			var upErr *upstreamHTTPError
+			if errors.As(err, &upErr) {
+				// relay the upstream's own OpenAI-shaped error verbatim
+				s.log.Warn("tts upstream rejected request",
+					logging.F("req_id", r.Header.Get("X-Request-Id")),
+					logging.F("upstream", res.name), logging.F("status", upErr.Status),
+					logging.F("chunk", i))
+				w.Header().Set("Content-Type", upErr.ContentType)
+				if w.Header().Get("Content-Type") == "" {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				w.WriteHeader(upErr.Status)
+				w.Write(upErr.Body)
+				return
+			}
 			s.log.Error("tts upstream failure",
 				logging.F("req_id", r.Header.Get("X-Request-Id")),
 				logging.F("chunk", i), logging.F("error", errText(err)))
@@ -225,8 +253,15 @@ func (s *Server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 }
 
 // synthesize one chunk against the failover chain; returns WAV bytes.
+// On a non-200 upstream response it returns *upstreamHTTPError so the caller
+// relays the real error instead of wrapping it as audio.
 func (s *Server) synthesize(r *http.Request, cfg *config.Config, model string,
 	part speechRequest, route string) (*upstreamResult, []byte, error) {
+
+	// Upstream always gets an explicit wav request: gufo rejects other
+	// values (and empty strings), wav is universally valid, and any client
+	// format we can't pass through is transcoded locally anyway.
+	part.ResponseFormat = "wav"
 
 	payload, err := json.Marshal(part)
 	if err != nil {
@@ -246,11 +281,15 @@ func (s *Server) synthesize(r *http.Request, cfg *config.Config, model string,
 	if err != nil {
 		return nil, nil, err
 	}
-	wav, err := readBody(res.body, 64<<20)
+	body, err := readBody(res.body, 64<<20)
 	if err != nil {
 		return res, nil, err
 	}
-	return res, wav, nil
+	if res.status != http.StatusOK {
+		ct := res.header.Get("Content-Type")
+		return res, nil, &upstreamHTTPError{Status: res.status, Body: body, ContentType: ct}
+	}
+	return res, body, nil
 }
 
 // ------------------------------------------------------------------ helpers
