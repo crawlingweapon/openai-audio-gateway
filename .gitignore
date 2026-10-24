@@ -1,0 +1,5 @@
+/audio-gateway
+/dist/
+*.test
+coverage.out
+generated_keys.yaml

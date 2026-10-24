@@ -1,0 +1,127 @@
+# openai-audio-gateway configuration.
+# Reloadable at runtime: `kill -HUP $(cat /pid)` or `systemctl reload audio-gateway`.
+# Except `listen`, every section hot-reloads; invalid reloads are rejected and the
+# running config stays active (check the journal for the validation error).
+
+version: 1
+
+listen:
+  host: 0.0.0.0
+  port: 8086
+
+# Bearer auth for every /v1/* route. Empty key list = auth disabled (LAN trust).
+# auto_generate: if no keys are configured or found in keys_file, mint one with
+# crypto/rand on first boot, persist it 0600 to keys_file, log its fingerprint.
+auth:
+  auto_generate: true
+  keys_file: generated_keys.yaml   # relative to this config file
+  keys: []
+  #  - value: "put-a-long-random-string-here"
+  #    label: owui                  # shows up in logs + metrics as key_label=
+
+log:
+  level: info                       # debug | info | warn | error
+  # RFC3164 to a local socket for rsyslog -> centralized logging.
+  # Works beside stdout (journald) — both get the same structured lines.
+  syslog:
+    enabled: false
+    address: /dev/log
+    tag: audio-gateway
+    facility: local0                # auth|local0..local7|daemon|user
+
+cors:
+  enabled: false
+  origins: ["*"]
+
+metrics:
+  enabled: true
+  path: /metrics
+
+# Token bucket, keyed by API-key label (or client IP when auth is off).
+rate_limit:
+  enabled: false
+  requests_per_minute: 300
+  burst: 60
+
+# Named upstreams. Ordered fallback: a route tries each of its upstreams in
+# order on connection errors and 5xx responses, then fails OpenAI-shaped.
+upstreams:
+  - name: gufo-asr
+    url: http://127.0.0.1:8084/v1
+    timeout_seconds: 600
+    # api_key: ""                   # sent as Authorization: Bearer if set
+    # tls_skip_verify: false
+  - name: gufo-tts
+    url: http://127.0.0.1:8085/v1
+    timeout_seconds: 600
+
+# ---------------------------------------------------------------- speech-to-text
+stt:
+  upstreams: [gufo-asr]             # ordered fallback list
+  default_model: default/qwen3-asr-1.7b   # used when the client omits model
+  # client-visible id -> id sent upstream. Unlisted ids pass through untouched.
+  model_aliases:
+    default/qwen3-asr-1.7b: qwen3-asr-1.7b
+    whisper-1: qwen3-asr-1.7b
+    gpt-transcribe: qwen3-asr-1.7b
+  transcode: auto                   # auto = only non-WAV input; always | never
+  sample_rate: 16000                # ffmpeg -ar for transcoded input
+  channels: 1                       # ffmpeg -ac
+  max_concurrent: 4                 # simultaneous ffmpeg transcodes
+  max_upload_bytes: 104857600       # 100 MiB
+  transcode_timeout_seconds: 120
+
+# ---------------------------------------------------------------- text-to-speech
+tts:
+  upstreams: [gufo-tts]
+  default_model: default/qwen3-tts
+  # What to do when the client omits response_format:
+  #   passthrough -> return whatever the upstream produced (wav for gufo)
+  #   mp3 | wav | opus | flac | aac | pcm -> transcode upstream output to it
+  response_format_if_unspecified: passthrough
+  # Split requests longer than this on sentence boundaries and synthesize
+  # sequentially (OpenAI caps input at 4096 chars). 0 disables chunking.
+  max_input_chars: 4096
+  # strip   -> drop speed != 1.0 (upstreams like gufo reject it); v1 behavior
+  # atempo  -> genuinely rescale with ffmpeg (future)
+  speed_handling: strip
+  max_concurrent: 4
+  transcode_timeout_seconds: 120
+
+  # client-visible id -> id passed through when NOT matching a preset below
+  model_aliases:
+    default/qwen3-tts: qwen3-tts
+    tts-1: default/qwen3-tts
+    gpt-4o-mini-tts: default/qwen3-tts
+
+  # OpenAI voice names -> upstream voice names (applies when no preset matched)
+  voice_aliases:
+    alloy: voicea
+    echo: voicea
+    shimmer: voicea
+
+  # Presets = the model ids clients pick. Full id is yours to name.
+  # Fields here override the client body; with allow_body_override: true a
+  # client-sent voice/instructions wins when present.
+  presets:
+    - id: default/qwen3-tts
+      model: qwen3-tts
+      voice: voicea
+      language: english
+
+    - id: voice/female-warm
+      model: qwen3-tts
+      voice: voicea
+      language: english
+      instructions: |
+        a warm, natural young American female voice with a calm,
+        conversational tone and clear, unhurried articulation.
+
+    - id: voice/female-bubbly
+      model: qwen3-tts
+      voice: voiceb
+      language: english
+      allow_body_override: false
+      instructions: |
+        a light, cheerful young female voice with a friendly, upbeat
+        energy and bright, expressive articulation.

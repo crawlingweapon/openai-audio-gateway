@@ -1,0 +1,42 @@
+[Unit]
+Description=OpenAI-compatible audio gateway (STT/TTS transcode + presets)
+Documentation=https://github.com/crawlingweapon/openai-audio-gateway
+After=network.target
+
+[Service]
+Type=simple
+User=audio-gateway
+Group=audio-gateway
+ExecStartPre=/usr/local/bin/audio-gateway configtest -config /etc/audio-gateway/config.yaml
+ExecStart=/usr/local/bin/audio-gateway serve -config /etc/audio-gateway/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Config (read) + generated keys (write if auto_generate)
+ConfigurationDirectory=audio-gateway
+ConfigurationDirectoryMode=0750
+ReadWritePaths=/etc/audio-gateway
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+# Logging: stdout → journald; enable log.syslog in config for rsyslog too
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=audio-gateway
+
+[Install]
+WantedBy=multi-user.target
