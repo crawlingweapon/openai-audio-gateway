@@ -8,6 +8,7 @@ package transcode
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os/exec"
@@ -118,7 +119,42 @@ func ToWAV(ctx context.Context, src io.Reader, sampleRate, channels int) ([]byte
 	if out.Len() == 0 {
 		return nil, fmt.Errorf("ffmpeg produced no output")
 	}
-	return out.Bytes(), nil
+	// ffmpeg cannot seek on a pipe, so it streams the WAV header with
+	// placeholder sizes (0xFFFFFFFF or partial counts). Strict readers —
+	// gufo's ASR included — trust those fields and declare the file
+	// truncated. We hold the full buffer, so patch the sizes for real.
+	return fixWAVHeader(out.Bytes()), nil
+}
+
+// fixWAVHeader rewrites the RIFF and data chunk sizes of a complete in-memory
+// WAV to match the actual byte count. Non-WAV or already-correct input is
+// returned unchanged.
+func fixWAVHeader(b []byte) []byte {
+	if len(b) < 44 || string(b[0:4]) != "RIFF" {
+		return b
+	}
+	// canonical 44-byte header (ffmpeg's pcm_s16le layout)
+	if string(b[12:16]) == "fmt " && string(b[36:40]) == "data" {
+		binary.LittleEndian.PutUint32(b[4:8], uint32(len(b)-8))
+		binary.LittleEndian.PutUint32(b[40:44], uint32(len(b)-44))
+		return b
+	}
+	// otherwise walk chunks to find "data"
+	off := 12
+	for off+8 <= len(b) {
+		id := string(b[off : off+4])
+		sz := binary.LittleEndian.Uint32(b[off+4 : off+8])
+		if id == "data" {
+			binary.LittleEndian.PutUint32(b[4:8], uint32(len(b)-8))
+			binary.LittleEndian.PutUint32(b[off+4:off+8], uint32(len(b)-(off+8)))
+			return b
+		}
+		if sz == 0 || sz > uint32(len(b)) {
+			break // unparseable; leave as-is
+		}
+		off += 8 + int(sz) + int(sz)%2
+	}
+	return b
 }
 
 // ConvertWAV converts a WAV byte stream to the named container/codec.

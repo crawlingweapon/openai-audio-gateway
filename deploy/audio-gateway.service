@@ -16,7 +16,7 @@ TimeoutStopSec=30
 
 # Config (read) + generated keys (write if auto_generate)
 ConfigurationDirectory=audio-gateway
-ConfigurationDirectoryMode=0750
+ConfigurationDirectoryMode=0755
 ReadWritePaths=/etc/audio-gateway
 
 # Hardening
